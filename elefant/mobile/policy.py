@@ -1,7 +1,6 @@
-"""An OpenP2P-core adapter with parallel mobile actions and causal action history.
+"""OpenP2P-core adapter with parallel mobile actions and causal action history.
 
-This is a full-window TRAINING/reference-inference path, not a claimed optimized
-mobile KV-cache implementation. The upstream PC policy remains independently runnable.
+Full-window training/reference inference, not an optimized mobile KV-cache server.
 """
 from __future__ import annotations
 import torch
@@ -20,9 +19,9 @@ class MobilePolicy(nn.Module):
         self.action_encoder = nn.Sequential(nn.Linear(4+buttons, 128), nn.SiLU(), nn.Linear(128, n*d))
         self.conditioner = TimeGoalConditioner(d, goal_dim)
         self.head = HybridActionHead(d, buttons)
-        # The pretrained PC autoregressive decoder is not a mobile action head.
-        # Preserve it for checkpoint traceability, but explicitly exclude it.
         self.core.action_decoder.requires_grad_(False)
+        if hasattr(self.core, "text_embed_mlp"):
+            self.core.text_embed_mlp.requires_grad_(False)
         self._mask_device = None
 
     @classmethod
@@ -44,24 +43,27 @@ class MobilePolicy(nn.Module):
             self._mask_device = str(frames.device)
         d = self.core.config.embed_dim
         n = self.core.config.n_action_tokens
+        condition_dtype = next(self.conditioner.parameters()).dtype
         if goal is None:
-            goal = torch.zeros(b, t, self.goal_dim, device=frames.device)
+            goal = torch.zeros(b, t, self.goal_dim, device=frames.device, dtype=condition_dtype)
         if visible is None:
             visible = torch.zeros(b, t, device=frames.device, dtype=torch.bool)
-        condition = self.conditioner(timing, goal, visible)
-        images = self.core.image_tokenizer(frames.float()/255)
+        condition = self.conditioner(timing.to(condition_dtype), goal.to(condition_dtype), visible)
+        # bf16-true has no autocast; explicit input conversion must match weights.
+        image_dtype = next(self.core.image_tokenizer.parameters()).dtype
+        images = self.core.image_tokenizer(frames.to(dtype=image_dtype)/255)
         images = images + self.core.img_pos_tokens.unsqueeze(0)
-        # No extra Gemma model is loaded. Use the pretrained 'no text' token.
         text = self.core.text_embedding_for_no_text_input + self.core.text_pos_tokens
         text = text.unsqueeze(0).expand(b, t, -1, -1)
         thinking = self.core.thinking_pos_tokens.unsqueeze(0).expand(b, t, -1, -1)
         output = self.core.action_out_token.unsqueeze(0).expand(b, t, -1, -1)
         output = output + condition.unsqueeze(2)
-        actions = self.action_encoder(executed).reshape(b, t, n, d)
+        action_dtype = next(self.action_encoder.parameters()).dtype
+        actions = self.action_encoder(executed.to(action_dtype)).reshape(b, t, n, d)
         actions = actions + self.core.action_pos_tokens.unsqueeze(0)
         packed = torch.cat((text, images, thinking, output, actions), dim=2).flatten(1, 2)
-        # The EXISTING OpenP2P mask hides all current and future action tokens
-        # from the current output token. Do not pre-shift executed[] a second time.
+        # The original mask hides current/future action tokens from current output.
+        # executed[t] is the action AFTER frame[t]; do not pre-shift it again.
         hidden, _, _, _ = self.core._transformer(packed)
         features = hidden.index_select(1, self.core.output_action_token_idx)
         return self.head(features)
@@ -69,4 +71,4 @@ class MobilePolicy(nn.Module):
     def parameter_report(self):
         return {"total": sum(p.numel() for p in self.parameters()),
                 "trainable": sum(p.numel() for p in self.parameters() if p.requires_grad),
-                "excluded": "unused pretrained PC autoregressive decoder; mobile head replaces it"}
+                "excluded": "unused PC autoregressive decoder and external-text projection"}
