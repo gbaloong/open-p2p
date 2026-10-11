@@ -3,18 +3,26 @@ on:
   pull_request:
     paths:
       - 'elefant/**'
+      - 'scripts/ci/**'
       - 'scripts/download_checkpoints.py'
       - 'tests/integration/**'
+      - 'tests/ci/**'
       - '.github/workflows/mobile-integration.yml'
+      - '.github/workflows/self-hosted-ci.yml'
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: open-p2p-hosted-ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   cpu-components:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Preserve exact tested source
         run: |
           mkdir -p outputs
@@ -28,22 +36,20 @@ jobs:
             outputs/tested-revision.txt
           retention-days: 3
           if-no-files-found: error
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Install isolated CPU test dependencies
-        run: |
-          python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install numpy pytest
-      - name: Run unit, causality, replay and synthetic-training tests
-        run: python -m pytest -q tests/integration --junitxml=outputs/mobile-tests.xml
-      - name: Syntax and downloader dry-run
-        run: |
-          python -m compileall -q elefant/integration elefant/mobile elefant/policy_model/train.py
-          python scripts/download_checkpoints.py 1200M --dry-run
+      - name: Prepare isolated CPU component environment
+        id: ci-env
+        run: python scripts/ci/bootstrap.py --profile cpu --cache-root "$RUNNER_TEMP/open-p2p-ci" --github-output "$GITHUB_OUTPUT"
+      - name: Same component CI entry as local runner
+        env:
+          CI_PYTHON: ${{ steps.ci-env.outputs.python }}
+        run: '"$CI_PYTHON" scripts/ci/run.py --profile cpu'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mobile-cpu-test-results
-          path: outputs/mobile-tests.xml
-          if-no-files-found: ignore
+          path: outputs/local-ci/
+          if-no-files-found: warn
+          retention-days: 7

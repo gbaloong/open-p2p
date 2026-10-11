@@ -1,0 +1,5 @@
+# Component-test environment, deliberately independent of pyproject.toml / uv.lock.
+# torch is installed separately from the selected official CPU or cu128 index.
+numpy==2.3.5
+pytest==9.0.2
+PyYAML==6.0.3
