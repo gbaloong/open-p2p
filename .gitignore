@@ -11,3 +11,11 @@ yt_videos/
 target
 data_folder/
 data_folder_validation/
+
+# Local checkpoints, private recordings, and measured experiment outputs
+/checkpoints/
+/outputs/
+/datasets/
+*.ckpt
+*.npz
+*.safetensors

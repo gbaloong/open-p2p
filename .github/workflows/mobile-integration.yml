@@ -1,0 +1,55 @@
+name: Mobile integration CPU tests
+on:
+  pull_request:
+    paths:
+      - 'elefant/**'
+      - 'scripts/ci/**'
+      - 'scripts/download_checkpoints.py'
+      - 'tests/integration/**'
+      - 'tests/ci/**'
+      - '.github/workflows/mobile-integration.yml'
+      - '.github/workflows/self-hosted-ci.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: open-p2p-hosted-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cpu-components:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Preserve exact tested source
+        run: |
+          mkdir -p outputs
+          git rev-parse HEAD > outputs/tested-revision.txt
+          git archive --format=tar.gz HEAD > outputs/mobile-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-source-snapshot
+          path: |
+            outputs/mobile-source.tar.gz
+            outputs/tested-revision.txt
+          retention-days: 3
+          if-no-files-found: error
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Prepare isolated CPU component environment
+        id: ci-env
+        run: python scripts/ci/bootstrap.py --profile cpu --cache-root "$RUNNER_TEMP/open-p2p-ci" --github-output "$GITHUB_OUTPUT"
+      - name: Same component CI entry as local runner
+        env:
+          CI_PYTHON: ${{ steps.ci-env.outputs.python }}
+        run: '"$CI_PYTHON" scripts/ci/run.py --profile cpu'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mobile-cpu-test-results
+          path: outputs/local-ci/
+          if-no-files-found: warn
+          retention-days: 7

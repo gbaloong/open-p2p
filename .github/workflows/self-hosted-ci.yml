@@ -1,0 +1,90 @@
+name: OpenP2P Self-hosted CI
+
+# Never execute fork PR code on a persistent local machine.
+# PR validation remains in mobile-integration.yml on GitHub-hosted runners.
+on:
+  push:
+    branches: [main, integration/mobile-policy-foundation]
+    paths:
+      - 'elefant/**'
+      - 'scripts/ci/**'
+      - 'scripts/download_checkpoints.py'
+      - 'tests/**'
+      - '.github/workflows/self-hosted-ci.yml'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'cpu components, or CUDA smoke (requires open-p2p-gpu runner label)'
+        type: choice
+        default: cpu
+        options: [cpu, cuda]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: open-p2p-local-ci-${{ github.ref }}-${{ inputs.profile || 'cpu' }}
+  cancel-in-progress: true
+
+jobs:
+  local-components:
+    if: >-
+      github.repository == 'gbaloong/open-p2p' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/integration/mobile-policy-foundation')
+    name: Local ${{ inputs.profile || 'cpu' }} components
+    runs-on: ${{ fromJSON(inputs.profile == 'cuda' && '["self-hosted","Linux","X64","open-p2p-gpu"]' || '["self-hosted","Linux","X64"]') }}
+    timeout-minutes: 30
+    env:
+      CI_PROFILE: ${{ inputs.profile || 'cpu' }}
+      CI_SOURCE: ci-work/${{ github.run_id }}-${{ github.run_attempt }}
+      PYTHONNOUSERSITE: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - name: Checkout into a fresh CI-only directory
+        uses: actions/checkout@v6
+        with:
+          path: ${{ env.CI_SOURCE }}
+          clean: false
+          show-progress: false
+          fetch-depth: 1
+          persist-credentials: false
+          lfs: false
+          submodules: false
+      - name: Use CI Python without changing system Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Prepare isolated CPU or CUDA component environment
+        id: ci-env
+        shell: bash
+        working-directory: ${{ env.CI_SOURCE }}
+        run: |
+          set -euo pipefail
+          python scripts/ci/bootstrap.py --profile "$CI_PROFILE" --github-output "$GITHUB_OUTPUT"
+      - name: Environment probe and component CI
+        shell: bash
+        working-directory: ${{ env.CI_SOURCE }}
+        env:
+          CI_PYTHON: ${{ steps.ci-env.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$CI_PYTHON" scripts/ci/run.py --profile "$CI_PROFILE"
+      - name: Upload measured reports (no weights or recordings)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-ci-${{ env.CI_PROFILE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CI_SOURCE }}/outputs/local-ci/
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Remove only this run's disposable checkout
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          parent="${GITHUB_WORKSPACE:?}/ci-work"
+          current="$parent/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -d "$current" && ! -L "$parent" && ! -L "$current" ]]; then
+            rm -rf -- "$current"
+          fi
